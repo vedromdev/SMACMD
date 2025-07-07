@@ -1973,7 +1973,7 @@ class scmdwd(QtWidgets.QMainWindow):
         self.itemcondition='https://steamcommunity.com/sharedfiles/filedetails/?id='
         self.collectioncondition='https://steamcommunity.com/workshop/browse/?section=collections&appid='
     def PreScript(self):
-        self.script=f'{self.realpath}'
+        self.script=f'\"{self.realpath}\"'
         if self.data["cdf"]==True:
             self.script+=f' +force_install_dir {os.path.realpath(self.data["dfolder"])}'
         self.script+=' +login '
