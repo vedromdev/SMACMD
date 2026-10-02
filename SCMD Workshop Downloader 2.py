@@ -16,6 +16,316 @@ from PyQt5 import QtCore,QtGui,QtWidgets
 from PyQt5.QtGui import QCursor,QIcon,QFont,QFontDatabase,QPalette,QColor,QIntValidator,QPixmap
 from PyQt5.QtCore import QEvent,Qt,QPoint,pyqtSignal
 from PyQt5.QtWidgets import QMenu,QComboBox,QCheckBox,QFileDialog,QColorDialog
+# ---------------------------------------------------------------------------
+# Cross-platform helpers, theming system and animations
+# ---------------------------------------------------------------------------
+import shutil
+import subprocess
+from PyQt5.QtCore import QPropertyAnimation, QEasingCurve, QVariantAnimation, QPointF
+from PyQt5.QtGui import QPainter, QPen, QBrush, QPolygonF
+
+APP_NAME = 'SCMD Workshop Downloader 2'
+STEAMCMD_EXECUTABLES = ('steamcmd.exe', 'steamcmd.sh', 'steamcmd')
+
+
+def is_frozen():
+    return bool(getattr(sys, 'frozen', False)) or ('RESOURCEPATH' in os.environ)
+
+
+def _copy_tree(src, dst, overwrite):
+    if not os.path.isdir(src):
+        return
+    for root, _dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        target = dst if rel == '.' else os.path.join(dst, rel)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError:
+            continue
+        for name in files:
+            source = os.path.join(root, name)
+            destination = os.path.join(target, name)
+            if overwrite or not os.path.exists(destination):
+                try:
+                    shutil.copy2(source, destination)
+                except OSError:
+                    pass
+
+
+def prepare_runtime():
+    """When bundled (for example a macOS .app) the installed folder is
+    read-only, so copy the writable data and resources into a per-user folder
+    and run from there. Every relative path used across the app keeps working."""
+    if not is_frozen():
+        return
+    base = os.environ.get('RESOURCEPATH') or os.path.dirname(os.path.abspath(sys.executable))
+    if sys.platform == 'darwin':
+        app_dir = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', APP_NAME)
+    elif os.name == 'nt':
+        app_dir = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), APP_NAME)
+    else:
+        app_dir = os.path.join(os.path.expanduser('~'), '.local', 'share', APP_NAME)
+    try:
+        os.makedirs(app_dir, exist_ok=True)
+    except OSError:
+        return
+    _copy_tree(os.path.join(base, 'resources'), os.path.join(app_dir, 'resources'), True)
+    for folder in ('data', 'download lists', 'generated scripts'):
+        _copy_tree(os.path.join(base, folder), os.path.join(app_dir, folder), False)
+    for filename in ('SCMD List Manager.py',):
+        source = os.path.join(base, filename)
+        destination = os.path.join(app_dir, filename)
+        if os.path.exists(source) and not os.path.exists(destination):
+            try:
+                shutil.copy2(source, destination)
+            except OSError:
+                pass
+    try:
+        os.makedirs(os.path.join(app_dir, 'data'), exist_ok=True)
+    except OSError:
+        pass
+    try:
+        os.chdir(app_dir)
+    except OSError:
+        pass
+
+
+def open_path(path):
+    """Open a file or folder with the operating system default application."""
+    try:
+        target = os.path.realpath(path)
+    except Exception:
+        target = str(path)
+    try:
+        if sys.platform == 'darwin':
+            subprocess.Popen(['open', target])
+        elif os.name == 'nt':
+            os.startfile(target)
+        else:
+            subprocess.Popen(['xdg-open', target])
+        return True
+    except Exception:
+        try:
+            webbrowser.open('file://' + target)
+            return True
+        except Exception:
+            return False
+
+
+def launch_list_manager():
+    """Start the SCMD List Manager helper on any platform. Raises if it is
+    not available so callers can show their normal error message."""
+    executable = os.path.realpath('SCMD List Manager.exe')
+    script = os.path.realpath('SCMD List Manager.py')
+    if os.name == 'nt' and os.path.exists(executable):
+        open_path(executable)
+        return
+    if os.path.exists(script):
+        interpreter = sys.executable
+        if is_frozen():
+            interpreter = shutil.which('python3') or shutil.which('python')
+            if interpreter is None:
+                raise FileNotFoundError('SCMD List Manager needs a system Python interpreter')
+        subprocess.Popen([interpreter, script])
+        return
+    raise FileNotFoundError('SCMD List Manager not found')
+
+
+def steamcmd_dir(path):
+    text = str(path).replace('\\', '/')
+    for name in STEAMCMD_EXECUTABLES:
+        if text.endswith('/' + name):
+            return text[:-len(name) - 1]
+    return os.path.dirname(text) if text else ''
+
+
+def steamcmd_path(path):
+    text = str(path).replace('\\', '/')
+    for name in STEAMCMD_EXECUTABLES:
+        if text.endswith('/' + name):
+            return text
+    return text
+
+
+def _clamp(value):
+    return max(0, min(255, int(round(value))))
+
+
+def _scale(color, factor):
+    return [_clamp(c * factor) for c in color]
+
+
+def _mix(color_a, color_b, t):
+    return [_clamp(color_a[i] + (color_b[i] - color_a[i]) * t) for i in range(3)]
+
+
+def make_theme(accent, accent2, red, bg, panel, title, text):
+    accent = list(accent)
+    accent2 = list(accent2)
+    red = list(red)
+    bg = list(bg)
+    panel = list(panel)
+    title = list(title)
+    text = list(text)
+    text_hover = [25, 25, 30] if sum(bg) > 384 else [255, 255, 255]
+    return {
+        'a': accent + _scale(accent, 1.2),
+        'd': _mix(accent, [255, 255, 255], 0.35),
+        'r': red,
+        'g': accent + accent2 + _scale(accent, 1.15) + _scale(accent2, 1.15),
+        'b': bg,
+        'i': panel,
+        't': title,
+        'w': text + text_hover,
+    }
+
+
+# name -> (accent, accent2, red, background, panel/input, title bar, text)
+THEME_COLORS = {
+    'Default': ((92, 126, 16), (117, 160, 21), (194, 93, 93), (23, 26, 33), (50, 53, 60), (35, 38, 43), (199, 213, 224)),
+    'Scarlet': ((253, 135, 1), (217, 166, 68), (193, 91, 91), (88, 24, 67), (144, 11, 63), (199, 0, 59), (199, 213, 224)),
+    'Midnight': ((61, 163, 241), (36, 96, 208), (194, 93, 93), (23, 26, 33), (50, 53, 60), (35, 38, 43), (199, 213, 224)),
+    'Ocean': ((0, 188, 212), (0, 131, 143), (255, 82, 82), (10, 25, 41), (22, 45, 66), (16, 34, 54), (207, 231, 243)),
+    'Forest': ((76, 175, 80), (46, 125, 50), (239, 108, 96), (18, 30, 22), (33, 50, 38), (25, 40, 30), (214, 235, 216)),
+    'Sunset': ((255, 138, 61), (244, 81, 108), (233, 86, 110), (34, 20, 36), (58, 34, 60), (45, 26, 48), (245, 222, 220)),
+    'Royal': ((149, 117, 205), (103, 58, 183), (233, 87, 118), (24, 22, 38), (44, 42, 66), (34, 32, 52), (224, 219, 244)),
+    'Cyberpunk': ((0, 229, 255), (255, 0, 132), (255, 45, 85), (12, 8, 20), (28, 16, 42), (20, 10, 32), (232, 234, 246)),
+    'Matrix': ((0, 230, 118), (0, 168, 85), (255, 64, 64), (5, 16, 10), (14, 34, 22), (9, 24, 15), (198, 255, 214)),
+    'Coffee': ((198, 145, 89), (146, 101, 58), (224, 122, 95), (38, 28, 24), (58, 44, 36), (46, 34, 28), (235, 220, 205)),
+    'Dracula': ((189, 147, 249), (139, 233, 253), (255, 85, 85), (40, 42, 54), (68, 71, 90), (52, 54, 70), (248, 248, 242)),
+    'Nord': ((136, 192, 208), (94, 129, 172), (191, 97, 106), (46, 52, 64), (59, 66, 82), (65, 74, 90), (216, 222, 233)),
+    'Gruvbox': ((250, 189, 47), (215, 153, 33), (251, 73, 52), (40, 40, 40), (60, 56, 54), (50, 48, 47), (235, 219, 178)),
+    'Monochrome': ((170, 170, 170), (120, 120, 120), (200, 80, 80), (20, 20, 20), (40, 40, 40), (30, 30, 30), (230, 230, 230)),
+    'Blood': ((229, 57, 53), (183, 28, 28), (255, 111, 97), (24, 12, 12), (46, 24, 24), (36, 18, 18), (241, 208, 208)),
+    'Gold': ((212, 175, 55), (176, 141, 30), (224, 108, 117), (28, 24, 16), (48, 42, 28), (38, 33, 22), (240, 229, 196)),
+    'Solarized': ((38, 139, 210), (181, 137, 0), (220, 50, 47), (0, 43, 54), (7, 54, 66), (0, 36, 46), (147, 161, 161)),
+    'Carbon': ((120, 144, 156), (84, 110, 122), (224, 108, 117), (18, 18, 20), (38, 40, 44), (28, 29, 33), (226, 230, 235)),
+    'Paper': ((127, 176, 237), (168, 203, 240), (192, 57, 43), (242, 239, 233), (255, 255, 255), (228, 224, 216), (42, 42, 42)),
+    'Snow': ((122, 178, 224), (163, 204, 238), (203, 67, 53), (250, 251, 252), (255, 255, 255), (236, 240, 243), (45, 52, 54)),
+    'Mint': ((110, 201, 178), (150, 219, 201), (211, 84, 0), (240, 249, 246), (255, 255, 255), (222, 240, 235), (35, 55, 50)),
+    'Blush': ((232, 143, 183), (240, 178, 206), (198, 40, 40), (253, 242, 247), (255, 255, 255), (248, 225, 236), (74, 42, 58)),
+}
+
+THEMES = {}
+for _name, _spec in THEME_COLORS.items():
+    THEMES[_name] = make_theme(*_spec)
+del _name, _spec
+
+
+def build_cursor(accent, outline):
+    pixmap = QPixmap(34, 34)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    points = [(2, 1), (2, 27), (8.5, 20.5), (13.5, 31), (18, 29), (13, 19), (22, 19)]
+    polygon = QPolygonF([QPointF(x, y) for x, y in points])
+    painter.setPen(QPen(QColor(outline[0], outline[1], outline[2]), 2))
+    painter.setBrush(QBrush(QColor(accent[0], accent[1], accent[2])))
+    painter.drawPolygon(polygon)
+    painter.end()
+    return QCursor(pixmap, 2, 1)
+
+
+def theme_group(data, key):
+    palette = data.get('palette', 0)
+    if palette == 2:
+        return data.get('c' + key, data.get(key))
+    if palette == 1:
+        return data.get('b' + key, data.get(key))
+    return data.get(key)
+
+
+class SplashScreen(QtWidgets.QWidget):
+    """Optional animated opening screen shown before the main window."""
+    finished = pyqtSignal()
+
+    def __init__(self, data, parent=None):
+        super(SplashScreen, self).__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SplashScreen)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFixedSize(460, 260)
+        self.setWindowOpacity(0.0)
+        self.data = data
+        self.animations = bool(data.get('animations', True))
+        self.progress = 0.0
+        self._ticks = 0
+        self._logo = QPixmap('./resources/scmd.png')
+        self._fade_in = None
+        self._fade_out = None
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            self.move(screen.availableGeometry().center() - self.rect().center())
+        self.show()
+        self.raise_()
+        if self.animations:
+            self._fade_in = QPropertyAnimation(self, b'windowOpacity', self)
+            self._fade_in.setDuration(640)
+            self._fade_in.setStartValue(0.0)
+            self._fade_in.setEndValue(1.0)
+            self._fade_in.setEasingCurve(QEasingCurve.OutCubic)
+            self._fade_in.start()
+        else:
+            self.setWindowOpacity(1.0)
+        self._timer.start(30)
+
+    def _tick(self):
+        self._ticks += 1
+        total = 34 if self.animations else 12
+        self.progress = min(1.0, self._ticks / float(total))
+        self.update()
+        if self._ticks >= total:
+            self._timer.stop()
+            self._finish()
+
+    def _finish(self):
+        if self.animations:
+            self._fade_out = QPropertyAnimation(self, b'windowOpacity', self)
+            self._fade_out.setDuration(360)
+            self._fade_out.setStartValue(self.windowOpacity())
+            self._fade_out.setEndValue(0.0)
+            self._fade_out.setEasingCurve(QEasingCurve.InCubic)
+            self._fade_out.finished.connect(self._done)
+            self._fade_out.start()
+        else:
+            self._done()
+
+    def _done(self):
+        self.close()
+        self.finished.emit()
+
+    def paintEvent(self, event):
+        accent = theme_group(self.data, 'g')[0:3]
+        text = theme_group(self.data, 'w')[0:3]
+        background = theme_group(self.data, 't')
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(QPen(QColor(accent[0], accent[1], accent[2]), 1.5))
+        painter.setBrush(QBrush(QColor(background[0], background[1], background[2])))
+        painter.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, 14, 14)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(accent[0], accent[1], accent[2])))
+        painter.drawRoundedRect(1, 1, self.width() - 2, 6, 3, 3)
+        if not self._logo.isNull():
+            logo = self._logo.scaled(92, 92, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            painter.drawPixmap((self.width() - logo.width()) // 2, 40, logo)
+        painter.setPen(QPen(QColor(text[0], text[1], text[2])))
+        painter.setFont(QtGui.QFont('Arial', 13, QtGui.QFont.Bold))
+        painter.drawText(QtCore.QRect(0, 148, self.width(), 28), Qt.AlignCenter, APP_NAME)
+        painter.setFont(QtGui.QFont('Arial', 9))
+        painter.drawText(QtCore.QRect(0, 176, self.width(), 22), Qt.AlignCenter, 'Loading your workshop tools...')
+        track_x, track_y, track_w, track_h = 60, 218, self.width() - 120, 8
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(text[0], text[1], text[2], 60)))
+        painter.drawRoundedRect(track_x, track_y, track_w, track_h, 4, 4)
+        painter.setBrush(QBrush(QColor(accent[0], accent[1], accent[2])))
+        painter.drawRoundedRect(track_x, track_y, int(track_w * self.progress), track_h, 4, 4)
+        painter.end()
+
+
 class CTabWindow(QtWidgets.QTabWidget):
     def __init__(self, parent=None):
         super(CTabWindow, self).__init__(parent)
@@ -121,6 +431,11 @@ class scmdwd(QtWidgets.QMainWindow):
             self.list=json.load(f)
         App_Font='Arial'
         self.list=self.list["list"]
+        for _key, _default in (("theme", "Default"), ("animations", True), ("cursor", False), ("opening", True)):
+            if _key not in self.data:
+                self.data[_key]=_default
+        self._window_anim=None
+        self._theme_anim=None
         self.wdict={}
         self.onlyInt=QIntValidator(0, 999, self)
         self.notallowed0=QtWidgets.QFrame()
@@ -556,6 +871,38 @@ class scmdwd(QtWidgets.QMainWindow):
         self.configDLP_CheckBox.setCursor(QCursor(QtCore.Qt.PointingHandCursor))
         self.configDLP_CheckBox.setFixedSize(166,32)
         self.configDLP_CheckBox.move(12,158)
+        self.configTheme_ComboBox=QComboBox()
+        self.configTheme_ComboBox.setObjectName('configTheme_ComboBox')
+        self.configTheme_ComboBox.setFont(QtGui.QFont(App_Font,9))
+        self.configTheme_ComboBox.setCursor(QCursor(QtCore.Qt.PointingHandCursor))
+        self.configTheme_ComboBox.setFixedSize(160,30)
+        self.configTheme_ComboBox.move(462,128)
+        self.configTheme_ComboBox.setToolTip('Choose one of the built-in color themes')
+        self.configTheme_ComboBox.addItems(list(THEMES.keys()))
+        self.configAnimations_CheckBox=HCCheckBox()
+        self.configAnimations_CheckBox.setObjectName('configAnimations_CheckBox')
+        self.configAnimations_CheckBox.setFont(QtGui.QFont(App_Font,9))
+        self.configAnimations_CheckBox.setText('Animations')
+        self.configAnimations_CheckBox.setCursor(QCursor(QtCore.Qt.PointingHandCursor))
+        self.configAnimations_CheckBox.setFixedSize(160,30)
+        self.configAnimations_CheckBox.move(462,164)
+        self.configAnimations_CheckBox.setToolTip('Enable window fades, theme transitions and the opening animation')
+        self.configCursor_CheckBox=HCCheckBox()
+        self.configCursor_CheckBox.setObjectName('configCursor_CheckBox')
+        self.configCursor_CheckBox.setFont(QtGui.QFont(App_Font,9))
+        self.configCursor_CheckBox.setText('Cursor')
+        self.configCursor_CheckBox.setCursor(QCursor(QtCore.Qt.PointingHandCursor))
+        self.configCursor_CheckBox.setFixedSize(160,30)
+        self.configCursor_CheckBox.move(462,200)
+        self.configCursor_CheckBox.setToolTip('Use a themed custom mouse cursor')
+        self.configOpening_CheckBox=HCCheckBox()
+        self.configOpening_CheckBox.setObjectName('configOpening_CheckBox')
+        self.configOpening_CheckBox.setFont(QtGui.QFont(App_Font,9))
+        self.configOpening_CheckBox.setText('Intro anim')
+        self.configOpening_CheckBox.setCursor(QCursor(QtCore.Qt.PointingHandCursor))
+        self.configOpening_CheckBox.setFixedSize(160,30)
+        self.configOpening_CheckBox.move(462,236)
+        self.configOpening_CheckBox.setToolTip('Show the animated opening screen on launch')
         self.IHTab=CTabWindow()
         self.IHTab_SteamCMD=QtWidgets.QWidget()
         self.IHTab_Account=QtWidgets.QWidget()
@@ -912,6 +1259,15 @@ class scmdwd(QtWidgets.QMainWindow):
             self.configDLP_CheckBox.setChecked(True)
         if self.data['repeat']!='':
             self.configRepeat_Line.setText(str(self.data['repeat']))
+        if self.data.get('animations', True)==True:
+            self.configAnimations_CheckBox.setChecked(True)
+        if self.data.get('cursor', False)==True:
+            self.configCursor_CheckBox.setChecked(True)
+        if self.data.get('opening', True)==True:
+            self.configOpening_CheckBox.setChecked(True)
+        themeindex=self.configTheme_ComboBox.findText(str(self.data.get('theme', 'Default')))
+        if themeindex>=0:
+            self.configTheme_ComboBox.setCurrentIndex(themeindex)
         self.Config_Button.clicked.connect(lambda:self.EnableButtons())
         self.Config_Button.clicked.connect(lambda:self.Config())
         self.configOPTIONS_Button.clicked.connect(lambda:self.EnableButtons())
@@ -1021,7 +1377,7 @@ class scmdwd(QtWidgets.QMainWindow):
         self.IHTab_SteamCMD_Button.clicked.connect(lambda:webbrowser.open('https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip'))
         self.IHTab_Workshop_Button.clicked.connect(lambda:webbrowser.open('https://steamdb.info/sub/17906/apps/'))
         self.ESTab_SCMDWD_subtab_TAB4_Button.clicked.connect(lambda:webbrowser.open('https://steamdb.info/sub/17906/apps/'))
-        self.ESTab_SteamCMD_Button.clicked.connect(lambda:os.startfile(os.path.realpath('./resources/steamcmd.pdf')))
+        self.ESTab_SteamCMD_Button.clicked.connect(lambda:open_path(os.path.realpath('./resources/steamcmd.pdf')))
         self.ESTab_SteamCMD_Button.clicked.connect(lambda:webbrowser.open('https://developer.valvesoftware.com/wiki/SteamCMD'))
         self.CRButton0.clicked.connect(lambda:webbrowser.open('https://discord.com/invite/KZC6e8ZuyF'))
         self.CRButton1.clicked.connect(lambda:webbrowser.open('https://github.com/BerdyAlexei/SCMD-Workshop-Downloader-2'))
@@ -1068,6 +1424,22 @@ class scmdwd(QtWidgets.QMainWindow):
         self.configDLP_CheckBox.clicked.connect(lambda:self.Default2_Activator())
         self.configDLP_CheckBox.clicked.connect(lambda:self.SaveData())
         self.configDLP_CheckBox.clicked.connect(lambda:self.DLP())
+        self.configTheme_ComboBox.activated[str].connect(self.ApplyTheme)
+        self.configAnimations_CheckBox.clicked.connect(lambda:self.OnAnimationsToggle())
+        self.configCursor_CheckBox.clicked.connect(lambda:self.OnCursorToggle())
+        self.configOpening_CheckBox.clicked.connect(lambda:self.OnOpeningToggle())
+        self.configTheme_ComboBox.highlighted.connect(lambda _index:self.configInfo_Line.setPlainText('Pick one of the built-in themes. Applying a theme fills the color palette with preset colors that you can still tweak manually with the RGB options.'))
+        self.configAnimations_CheckBox.entered.connect(lambda:self.configInfo_Line.setPlainText('Turns on animated window fades, smooth color transitions when you switch themes, and the opening animation.'))
+        self.configCursor_CheckBox.entered.connect(lambda:self.configInfo_Line.setPlainText('Replaces the default mouse pointer with a themed custom cursor drawn with the current palette colors.'))
+        self.configOpening_CheckBox.entered.connect(lambda:self.configInfo_Line.setPlainText('Shows a short animated opening screen while the app is starting. Turn it off for a faster launch.'))
+        self.layout().addWidget(self.configTheme_ComboBox)
+        self.layout().addWidget(self.configAnimations_CheckBox)
+        self.layout().addWidget(self.configCursor_CheckBox)
+        self.layout().addWidget(self.configOpening_CheckBox)
+        self.configTheme_ComboBox.hide()
+        self.configAnimations_CheckBox.hide()
+        self.configCursor_CheckBox.hide()
+        self.configOpening_CheckBox.hide()
         self.layout().addWidget(self.Info_Frame)
         self.layout().addWidget(self.TitleBar_Frame)
         self.layout().addWidget(self.SCMDWD_Label)
@@ -1158,6 +1530,8 @@ class scmdwd(QtWidgets.QMainWindow):
         self.layout().addWidget(self.notallowed2)
         self.notallowed2.hide()
         self.layout().addWidget(self.dLink)
+        self._setup_menu()
+        self._apply_cursor()
     def sSS(self):
         if self.data["palette"]==2:
             self.a=self.data["ca"]
@@ -1271,6 +1645,10 @@ class scmdwd(QtWidgets.QMainWindow):
         self.configCDF_CheckBox.setStyleSheet(self.configCheckBox_Properties)
         self.configBSCIM_CheckBox.setStyleSheet(self.configCheckBox_Properties)
         self.configDLP_CheckBox.setStyleSheet(self.configCheckBox_Properties)
+        self.configTheme_ComboBox.setStyleSheet(self.ComboBox_Properties_0+'./resources/down.png'+self.ComboBox_Properties_1+'./resources/pdown.png");}')
+        self.configAnimations_CheckBox.setStyleSheet(self.configCheckBox_Properties)
+        self.configCursor_CheckBox.setStyleSheet(self.configCheckBox_Properties)
+        self.configOpening_CheckBox.setStyleSheet(self.configCheckBox_Properties)
         self.configA_RadioButton.setStyleSheet(self.RadioButton_Properties+f'{self.a[0]},{self.a[1]},{self.a[2]}'+');}')
         self.configpA_RadioButton.setStyleSheet(self.RadioButton_Properties+f'{self.a[3]},{self.a[4]},{self.a[5]}'+');}')
         self.configD_RadioButton.setStyleSheet(self.RadioButton_Properties+f'{self.d[0]},{self.d[1]},{self.d[2]}'+');}')
@@ -1345,6 +1723,113 @@ class scmdwd(QtWidgets.QMainWindow):
         self.Default1_Activator()
         self.Default2_Activator()
         self.Default3_Activator()
+    def ApplyTheme(self, name, animate=True):
+        theme=THEMES.get(name)
+        if theme is None:
+            return
+        keys=('a','d','r','g','b','i','t','w')
+        previous={}
+        for key in keys:
+            previous[key]=list(self.data.get('c'+key, self.data.get(key)))
+        for key in keys:
+            self.data['c'+key]=list(theme[key])
+        self.data['palette']=2
+        self.data['theme']=name
+        self.data['d3']=True
+        try:
+            self.configTheme_ComboBox.setCurrentIndex(self.configTheme_ComboBox.findText(name))
+        except:
+            pass
+        self.PaletteUpdater()
+        if animate and self.data.get('animations', True):
+            self._animate_theme(previous, theme)
+        else:
+            self.sSS()
+            self.RGB()
+        self._apply_cursor()
+        self.SaveData()
+    def _animate_theme(self, start, target):
+        keys=('a','d','r','g','b','i','t','w')
+        try:
+            self._theme_anim.stop()
+        except:
+            pass
+        animation=QVariantAnimation(self)
+        animation.setDuration(360)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.InOutCubic)
+        def blend(value):
+            for key in keys:
+                origin=start[key]
+                destination=list(target[key])
+                if len(origin)!=len(destination):
+                    self.data['c'+key]=destination
+                    continue
+                self.data['c'+key]=[_clamp(origin[i]+(destination[i]-origin[i])*value) for i in range(len(origin))]
+            self.sSS()
+        animation.valueChanged.connect(blend)
+        animation.finished.connect(self.RGB)
+        self._theme_anim=animation
+        animation.start()
+    def OnAnimationsToggle(self):
+        self.data['animations']=self.configAnimations_CheckBox.isChecked()
+        self.SaveData()
+        if self.data['animations']:
+            self.playOpenAnimation()
+    def OnCursorToggle(self):
+        self.data['cursor']=self.configCursor_CheckBox.isChecked()
+        self._apply_cursor()
+        self.SaveData()
+    def OnOpeningToggle(self):
+        self.data['opening']=self.configOpening_CheckBox.isChecked()
+        self.SaveData()
+    def _apply_cursor(self):
+        if self.data.get('cursor', False):
+            try:
+                accent=list(theme_group(self.data, 'g'))[0:3]
+                text=list(theme_group(self.data, 'w'))[0:3]
+                self.setCursor(build_cursor(accent, text))
+            except:
+                pass
+        else:
+            self.unsetCursor()
+    def _fade_window(self, start=0.0, end=1.0, duration=420):
+        if not self.data.get('animations', True):
+            self.setWindowOpacity(end)
+            return
+        try:
+            self._window_anim.stop()
+        except:
+            pass
+        animation=QPropertyAnimation(self, b'windowOpacity', self)
+        animation.setDuration(duration)
+        animation.setStartValue(float(start))
+        animation.setEndValue(float(end))
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._window_anim=animation
+        self.setWindowOpacity(float(start))
+        animation.start()
+    def playOpenAnimation(self):
+        self._fade_window(0.0, 1.0, 460)
+    def _setup_menu(self):
+        if sys.platform!='darwin':
+            return
+        try:
+            menu=self.menuBar()
+            app_menu=menu.addMenu(APP_NAME)
+            about=app_menu.addAction('About '+APP_NAME)
+            about.triggered.connect(lambda:(self.EnableButtons(), self.CR()))
+            options=app_menu.addAction('Options...')
+            options.triggered.connect(lambda:(self.EnableButtons(), self.Config()))
+            updates=app_menu.addAction('Check for updates')
+            updates.triggered.connect(lambda:webbrowser.open('https://github.com/BerdyAlexei/SCMD-Workshop-Downloader-2/releases'))
+            app_menu.addSeparator()
+            quit_action=app_menu.addAction('Quit '+APP_NAME)
+            quit_action.setMenuRole(QtWidgets.QAction.QuitRole)
+            quit_action.triggered.connect(lambda:self.Close())
+        except:
+            pass
     def EnableButtons(self):
         self.configES_Button.setDisabled(False)
         self.configIH_Button.setDisabled(False)
@@ -1480,6 +1965,10 @@ class scmdwd(QtWidgets.QMainWindow):
         self.configCDF_CheckBox.show()
         self.configBSCIM_CheckBox.show()
         self.configDLP_CheckBox.show()
+        self.configTheme_ComboBox.show()
+        self.configAnimations_CheckBox.show()
+        self.configCursor_CheckBox.show()
+        self.configOpening_CheckBox.show()
         self.configDownloadFolder_Line.show()
         self.configDefault0_Button.show()
         self.configDefault1_Button.show()
@@ -1599,6 +2088,10 @@ class scmdwd(QtWidgets.QMainWindow):
         self.configCDF_CheckBox.hide()
         self.configBSCIM_CheckBox.hide()
         self.configDLP_CheckBox.hide()
+        self.configTheme_ComboBox.hide()
+        self.configAnimations_CheckBox.hide()
+        self.configCursor_CheckBox.hide()
+        self.configOpening_CheckBox.hide()
         self.configDownloadFolder_Line.hide()
         self.configDefault0_Button.hide()
         self.configDefault1_Button.hide()
@@ -1853,7 +2346,7 @@ class scmdwd(QtWidgets.QMainWindow):
             self.EXCEC_Button.setText('DOWNLOAD && GENERATE')
     def EXCEC_Activator(self):
         self.workshop=self.Workshop_Plain.toPlainText()
-        self.realpath=(((str(self.SteamCMD_Line.text())).replace('/steamcmd.exe',''))+'/steamcmd.exe')
+        self.realpath=steamcmd_path(self.SteamCMD_Line.text())
         doessteamcmdexist=os.path.exists(self.realpath)
         if doessteamcmdexist==True and self.workshop!='':
             self.EXCEC_Button.setStyleSheet(self.Button_Properties_0+f'{self.a[0]},{self.a[1]},{self.a[2]}'+self.Button_Properties_1+f'{self.a[3]},{self.a[4]},{self.a[5]}'+');}')
@@ -1896,8 +2389,8 @@ class scmdwd(QtWidgets.QMainWindow):
             self.OPENFOLDER_Button.setText('OPEN FOLDER')
         if self.data["cdf"]==False:
             self.content_path=self.SteamCMD_Line.text()
-            self.content_path=((str(self.SteamCMD_Line.text())).replace('/steamcmd.exe',''))
-            self.content_path+='\steamapps\workshop\content'
+            self.content_path=steamcmd_dir(self.SteamCMD_Line.text())
+            self.content_path=os.path.join(self.content_path,'steamapps','workshop','content')
         else:
             self.content_path=os.path.realpath(self.configDownloadFolder_Line.text())
         if os.path.exists(os.path.realpath(self.content_path))==True:
@@ -1993,9 +2486,9 @@ class scmdwd(QtWidgets.QMainWindow):
         download={"script":self.script,"list":self.linksfixedlist,"datetime":datetimenow}
         with open('./data/download.json','w') as f:
             json.dump(download,f)
-        if os.path.exists(os.path.realpath('SCMD List Manager.exe'))==True:
+        if os.path.exists(os.path.realpath('SCMD List Manager.exe'))==True or os.path.exists(os.path.realpath('SCMD List Manager.py'))==True:
             try:
-                os.startfile(os.path.realpath('SCMD List Manager.exe'))
+                launch_list_manager()
             except:
                 self.Info_Line.setText('SCMD List Manager is broken (0)')
                 try:
@@ -2084,7 +2577,7 @@ class scmdwd(QtWidgets.QMainWindow):
         except:
             pass
     def SteamCMD(self):
-        steamcmd=QFileDialog.getOpenFileName(self,'Select steamcmd.exe','','SteamCMD executable (steamcmd.exe)')
+        steamcmd=QFileDialog.getOpenFileName(self,'Select SteamCMD executable','','SteamCMD executable (steamcmd.exe steamcmd.sh steamcmd);;All files (*)')
         if steamcmd:
             self.SteamCMD_Line.setText(steamcmd[0])
     def OpenFolder(self):
@@ -2097,13 +2590,13 @@ class scmdwd(QtWidgets.QMainWindow):
                     self.Info_Line.setText('Custom download folder opened')
                 else:
                     self.Info_Line.setText('SteamCMD download folder opened')
-                os.startfile(os.path.realpath(self.content_path))
+                open_path(os.path.realpath(self.content_path))
             if self.Mode_ComboBox.currentIndex()==2 or self.Mode_ComboBox.currentIndex()==3:
-                os.startfile(os.path.realpath('./generated scripts'))
+                open_path(os.path.realpath('./generated scripts'))
                 self.Info_Line.setText('Scripts folder opened')
             if self.Mode_ComboBox.currentIndex()==4 or self.Mode_ComboBox.currentIndex()==5:
-                os.startfile(os.path.realpath(self.content_path))
-                os.startfile(os.path.realpath('./generated scripts'))
+                open_path(os.path.realpath(self.content_path))
+                open_path(os.path.realpath('./generated scripts'))
                 if self.data["cdf"]==True:
                     self.Info_Line.setText('Scripts and custom download folder opened')
                 else:
@@ -2159,7 +2652,7 @@ class scmdwd(QtWidgets.QMainWindow):
         self.ScriptCleaner()
     def LoadList(self):
         try:
-            loadlist=QFileDialog.getOpenFileName(self,'Select steamcmd.exe','','Download list file (*.scmdwddl)')
+            loadlist=QFileDialog.getOpenFileName(self,'Select download list','','Download list file (*.scmdwddl);;All files (*)')
             if loadlist:
                 with open(f'{loadlist[0]}','r') as s:
                     self.Workshop_Plain.setPlainText(str(s.read()).replace(',','\n').replace('[','').replace(']','').replace("'",''))
@@ -2176,7 +2669,7 @@ class scmdwd(QtWidgets.QMainWindow):
             self.data['password']=''
         self.SaveData()
     def SaveData(self):
-        if os.path.exists(((str(self.SteamCMD_Line.text())).replace('/steamcmd.exe',''))+'\\steamcmd.exe')==False:
+        if os.path.exists(steamcmd_path(self.SteamCMD_Line.text()))==False:
             self.data['steamcmd']=''
         self.data['dfolder']=self.configDownloadFolder_Line.text()
         self.data['cdf']=self.configCDF_CheckBox.isChecked()
@@ -2457,11 +2950,22 @@ class ThreadClass(QtCore.QThread):
 	def run(self):
 		self.startSignal.emit(True)
 if __name__=='__main__':
+    prepare_runtime()
+    Aplication=QtWidgets.QApplication([])
+    Aplication.setApplicationName(APP_NAME)
+    Aplication.setApplicationDisplayName(APP_NAME)
     Palette=QPalette()
     Palette.setColor(QPalette.Highlight, QColor('#235FCF'))
     Palette.setColor(QPalette.Text,QColor(50,53,60))
-    Aplication=QtWidgets.QApplication([])
     Aplication.setPalette(Palette)
     MainWindow=scmdwd()
-    MainWindow.show()
+    def launch():
+        MainWindow.show()
+        MainWindow.playOpenAnimation()
+    if MainWindow.data.get('opening', True)==True:
+        splash=SplashScreen(MainWindow.data)
+        splash.finished.connect(launch)
+        splash.start()
+    else:
+        launch()
     Aplication.exec_()

@@ -76,3 +76,36 @@ Any data you enter into *SCMD Workshop Downloader 2* is stored only and **exclus
 ## About me
 
 I'm pretty new to programming, by the time I release this app it's been about a month since I started, I know my code isn't very good but I hope everything works fine. If you want to contact me, improve or use my code or help me with something; let me know! I will be happy to collaborate. You can contact me on Discord.
+
+## Appearance options
+
+Open *OPTIONS* in the config bar to find the new appearance settings:
+
+- **Theme** - pick from the built-in themes (Default, Scarlet, Midnight, Ocean, Forest, Sunset, Royal, Cyberpunk, Matrix, Coffee, Dracula, Nord, Gruvbox, Monochrome, Blood, Gold, Solarized, Carbon and the light Paper, Snow, Mint and Blush themes). Applying a theme fills the color palette, which you can still fine-tune with the RGB controls.
+- **Animations** - optional animated window fades, smooth color transitions when switching themes, and the opening animation.
+- **Cursor** - optional themed custom mouse cursor drawn with the current palette colors.
+- **Intro anim** - optional animated opening screen while the app starts. Turn it off for the fastest launch.
+
+## Run from source
+
+```
+python3 -m pip install -r requirements.txt
+python3 "SCMD Workshop Downloader 2.py"
+```
+
+## Build the macOS app
+
+The app can be packaged as a native macOS `.app` bundle with [py2app](https://py2app.readthedocs.io/). Building a Mac app requires macOS.
+
+On a Mac:
+
+```
+python3 -m pip install -r requirements.txt
+python3 -m pip install py2app pillow
+python3 setup.py py2app
+open "dist/SCMD Workshop Downloader 2.app"
+```
+
+Or let GitHub build it for you: run the **Build macOS app** workflow from the *Actions* tab (or push a tag like `v2.0.0`), then download the zipped `.app` from the run's artifacts.
+
+When running as a bundle the app keeps its writable data and resources in `~/Library/Application Support/SCMD Workshop Downloader 2`, because the app bundle itself is read-only.
